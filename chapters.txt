@@ -1,12 +1,7 @@
-# Solo Leveling — Chapter Range Config
-# ─────────────────────────────────────
-# Line 1: chapter range (START-END)
-# Line 2: number of scenes to generate
-#
-# To generate a new recap:
-#   1. Edit this file with the new chapter range
-#   2. git add chapters.txt && git commit -m "ch11-20" && git push
-#   3. GitHub Actions will auto-run the pipeline!
-
+# Solo Leveling — Config
+# Line 1: chapter range
+# Line 2: number of scenes
+# Line 3: format (reels = 1080x1920 for Instagram/FB | youtube = 1280x720)
 1-10
 10
+reels
