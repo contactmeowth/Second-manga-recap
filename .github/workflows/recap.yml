@@ -11,9 +11,21 @@ on:
         required: true
         default: '1-10'
       scenes:
-        description: 'Number of scenes'
+        description: 'Number of scenes (10-15 recommended)'
         required: false
         default: '10'
+      format:
+        description: 'Video format'
+        required: false
+        default: 'reels'
+        type: choice
+        options:
+          - reels      # 1080x1920 — Instagram/Facebook/TikTok
+          - youtube    # 1280x720  — YouTube
+
+# ── FIX: Allow workflow to push commits back to repo ──────────────
+permissions:
+  contents: write
 
 jobs:
   generate-recap:
@@ -31,7 +43,6 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      # ── KEY FIX: espeak-ng is REQUIRED by Kokoro for phoneme processing ──
       - name: 🔧 Install FFmpeg + espeak-ng + fonts
         run: |
           sudo apt-get update -qq
@@ -41,63 +52,67 @@ jobs:
             fonts-dejavu-core \
             --no-install-recommends
 
-      # ── Install Python packages (kokoro pulls torch ~800MB, cached after first run) ──
       - name: 📦 Install Python packages
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: 📋 Resolve chapters
+      - name: 📋 Resolve config
         id: cfg
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             CHAPTERS="${{ github.event.inputs.chapters }}"
             SCENES="${{ github.event.inputs.scenes }}"
+            FORMAT="${{ github.event.inputs.format }}"
           elif [ -f chapters.txt ]; then
-            CHAPTERS=$(grep -v '^#' chapters.txt | grep -v '^$' | head -1 | tr -d ' ')
+            CHAPTERS=$(grep -v '^#' chapters.txt | grep -v '^$' | sed -n '1p' | tr -d ' ')
             SCENES=$(grep -v '^#' chapters.txt | grep -v '^$' | sed -n '2p' | tr -d ' ')
+            FORMAT=$(grep -v '^#' chapters.txt | grep -v '^$' | sed -n '3p' | tr -d ' ')
             SCENES=${SCENES:-10}
+            FORMAT=${FORMAT:-reels}
           else
-            CHAPTERS="1-10"
-            SCENES="10"
+            CHAPTERS="1-10"; SCENES="10"; FORMAT="reels"
           fi
           echo "chapters=$CHAPTERS" >> $GITHUB_OUTPUT
           echo "scenes=$SCENES"     >> $GITHUB_OUTPUT
-          echo "▶  Chapters: $CHAPTERS | Scenes: $SCENES"
+          echo "format=$FORMAT"     >> $GITHUB_OUTPUT
+          echo "▶  Chapters=$CHAPTERS | Scenes=$SCENES | Format=$FORMAT"
 
-      - name: 🎬 Run recap pipeline
+      - name: 🎬 Run pipeline
         env:
-          KEY1:     ${{ secrets.KEY1 }}
-          KEY2:     ${{ secrets.KEY2 }}
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          USER_ID:  ${{ secrets.USER_ID }}
+          KEY1:         ${{ secrets.KEY1 }}
+          KEY2:         ${{ secrets.KEY2 }}
+          GEMINI_API_KEY: ${{ secrets.KEY1 }}
+          GROQ_API_KEY: ${{ secrets.GROQ_KEY }}
+          TG_TOKEN:     ${{ secrets.TG_TOKEN }}
+          USER_ID:      ${{ secrets.USER_ID }}
         run: |
           python recap_pipeline.py \
             --chapters "${{ steps.cfg.outputs.chapters }}" \
-            --scenes   "${{ steps.cfg.outputs.scenes }}"
+            --scenes   "${{ steps.cfg.outputs.scenes }}"   \
+            --format   "${{ steps.cfg.outputs.format }}"
 
-      - name: 📄 Show generated script (debug)
+      - name: 📄 Show generated script
         if: always()
         run: cat workspace/generated_script.json 2>/dev/null || echo "No script generated"
 
-      - name: 📤 Upload video artifact
+      - name: 📤 Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: recap-ch${{ steps.cfg.outputs.chapters }}-run${{ github.run_number }}
+          name: recap-ch${{ steps.cfg.outputs.chapters }}-${{ steps.cfg.outputs.format }}-run${{ github.run_number }}
           path: output/*.mp4
           retention-days: 14
 
       - name: 💾 Commit output
         if: success()
-        continue-on-error: true
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add output/*.mp4 workspace/generated_script.json 2>/dev/null || true
           git diff --cached --quiet || \
-            git commit -m "🎬 Solo Leveling Ch.${{ steps.cfg.outputs.chapters }} [run #${{ github.run_number }}]"
-          git push || true
+            git commit -m "🎬 Solo Leveling Ch.${{ steps.cfg.outputs.chapters }} [${{ steps.cfg.outputs.format }}] [run #${{ github.run_number }}]"
+          git push
 
       - name: 📱 Telegram — success
         if: success()
@@ -109,7 +124,7 @@ jobs:
           curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             -d chat_id="${USER_ID}" \
             -d parse_mode="HTML" \
-            -d text="✅ <b>Solo Leveling Ch.${{ steps.cfg.outputs.chapters }}</b> done!%0A🎬 Download: ${URL}" || true
+            -d text="✅ <b>Solo Leveling Ch.${{ steps.cfg.outputs.chapters }}</b> done!%0A📐 Format: ${{ steps.cfg.outputs.format }}%0A🎬 Download: ${URL}" || true
 
       - name: 📱 Telegram — failure
         if: failure()
