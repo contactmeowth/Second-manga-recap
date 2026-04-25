@@ -393,4 +393,135 @@ def build_clip(scene: dict, img_path: Path, aud_path: Path, out_path: Path, reso
     w, h     = resolution.split("x")
     duration = get_duration(aud_path) + 0.6
     fps      = 25
-    frames   = int(duration * fp
+    frames   = int(duration * fps)
+    sid      = scene["id"]
+    log(f"Scene {sid}: Building clip ({duration:.1f}s)...", "🎬")
+
+    # Ken Burns — alternate zoom in/out
+    zoom = "'min(zoom+0.0002,1.06)'" if sid % 2 == 0 else "'if(eq(on,1),1.06,max(zoom-0.0002,1.0))'"
+    fade_d = 0.3
+
+    vf = (
+        f"scale={int(w)*2}:{int(h)*2}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},"
+        f"zoompan=z={zoom}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={w}x{h}:fps={fps},"
+        f"fade=t=in:st=0:d={fade_d},"
+        f"fade=t=out:st={max(0, duration-fade_d)}:d={fade_d}"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-framerate", str(fps), "-i", str(img_path),
+        "-i", str(aud_path),
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "fast",
+        "-c:a", "aac", "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-t", str(duration), "-shortest",
+        str(out_path)
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        log(f"Scene {sid}: FFmpeg error — {result.stderr[-300:].decode()}", "❌")
+        raise subprocess.CalledProcessError(result.returncode, cmd)
+    log(f"Scene {sid}: Clip ready ✅", "")
+
+
+# ── Step 5: Concat + BGM ──────────────────────────────────────────
+def concat_and_mix(clips: list, output_path: Path):
+    log("Concatenating clips...", "🎞️")
+    txt = WORK_DIR / "concat.txt"
+    txt.write_text("\n".join(f"file '{p.resolve()}'" for p in clips))
+    merged = WORK_DIR / "merged.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(txt),
+        "-c:v", "libx264", "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart", str(merged)
+    ], check=True)
+
+    if BGM_PATH.exists():
+        log("Mixing BGM...", "🎵")
+        dur = get_duration(merged)
+        subprocess.run([
+            "ffmpeg", "-y", "-i", str(merged),
+            "-stream_loop", "-1", "-i", str(BGM_PATH),
+            "-filter_complex",
+            f"[1:a]volume=0.12,atrim=0:duration={dur}[bgm];[0:a][bgm]amix=inputs=2:duration=first[aout]",
+            "-map", "0:v", "-map", "[aout]",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart", str(output_path)
+        ], check=True)
+        merged.unlink(missing_ok=True)
+    else:
+        merged.rename(output_path)
+
+    mb = output_path.stat().st_size / (1024*1024)
+    dur = get_duration(output_path)
+    log(f"Done! {output_path} ({mb:.1f} MB, {dur:.0f}s) 🎉", "")
+
+
+# ── Telegram ──────────────────────────────────────────────────────
+def notify(msg: str):
+    token = os.environ.get("TG_TOKEN","")
+    uid   = os.environ.get("USER_ID","")
+    if not token or not uid: return
+    try:
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                      json={"chat_id":uid,"text":msg,"parse_mode":"HTML"}, timeout=10)
+    except: pass
+
+
+# ── Main ──────────────────────────────────────────────────────────
+def run(ch_start: int, ch_end: int, num_scenes: int, fmt: str):
+    setup()
+    resolution, aspect = FORMATS.get(fmt, FORMATS["reels"])
+    log(f"{MANGA_TITLE} | Ch.{ch_start}-{ch_end} | {num_scenes} scenes | {resolution} ({aspect})", "🚀")
+
+    plot   = fetch_wiki_plot(ch_start, ch_end)
+    script = generate_script(plot, ch_start, ch_end, num_scenes)
+    (WORK_DIR / "generated_script.json").write_text(json.dumps(script, indent=2, ensure_ascii=False))
+    log(f"Script saved ({len(script['scenes'])} scenes)", "💾")
+
+    scenes   = script["scenes"]
+    out_name = script.get("output_filename", f"solo_leveling_ch{ch_start}_{ch_end}.mp4")
+    out_path = OUTPUT_DIR / out_name
+    clips    = []
+
+    for scene in scenes:
+        sid      = scene["id"]
+        img_path = SCENES_DIR / f"scene_{sid:03d}.png"
+        aud_path = AUDIO_DIR  / f"scene_{sid:03d}.mp3"
+        clip_p   = SCENES_DIR / f"scene_{sid:03d}_clip.mp4"
+
+        if scene.get("type") == "ai_image":
+            generate_ai_image(scene, img_path, resolution)
+        else:
+            generate_static_bg(scene, img_path, resolution)
+
+        generate_audio(scene.get("narration",""), scene.get("voice","am_adam"), aud_path)
+        build_clip(scene, img_path, aud_path, clip_p, resolution)
+        clips.append(clip_p)
+        time.sleep(1)
+
+    concat_and_mix(clips, out_path)
+
+    total_dur = sum(get_duration(c) for c in clips)
+    notify(
+        f"✅ <b>{MANGA_TITLE} Ch.{ch_start}-{ch_end}</b> done!\n"
+        f"📁 {out_name}\n"
+        f"🎬 {len(scenes)} scenes | {total_dur:.0f}s | {resolution}"
+    )
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--chapters", default="1-10")
+    p.add_argument("--scenes",   type=int, default=10)
+    p.add_argument("--format",   default="reels", choices=["reels","youtube"],
+                   help="reels=1080x1920 (Instagram/FB), youtube=1280x720")
+    args = p.parse_args()
+    try:
+        s, e = map(int, args.chapters.split("-"))
+    except:
+        print("❌ Use format: --chapters 1-10"); sys.exit(1)
+    run(s, e, args.scenes, args.format)
