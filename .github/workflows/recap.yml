@@ -1,41 +1,50 @@
-name: 🎬 Manhwa Recap Generator
+name: 🎬 Panel Recap Generator
 
 on:
   push:
     paths:
-      - 'chapters.txt'
+      - 'panels/**'      # auto-trigger when you push new panel images
+      - 'config.txt'     # or when you update config
   workflow_dispatch:
     inputs:
       chapters:
-        description: 'Chapter range e.g. 1-10'
+        description: 'Chapter range e.g. 1-5'
         required: true
-        default: '1-10'
-      scenes:
-        description: 'Number of scenes (10-15 recommended)'
-        required: false
-        default: '10'
+        default: '1-5'
       format:
         description: 'Video format'
         required: false
         default: 'reels'
         type: choice
         options:
-          - reels      # 1080x1920 — Instagram/Facebook/TikTok
-          - youtube    # 1280x720  — YouTube
+          - reels       # 1080x1920 — Instagram/Facebook/TikTok
+          - youtube     # 1280x720  — YouTube
+      voice:
+        description: 'Narrator voice'
+        required: false
+        default: 'am_adam'
+        type: choice
+        options:
+          - am_adam
+          - am_michael
+          - af_heart
+          - af_bella
+          - bm_george
 
-# ── FIX: Allow workflow to push commits back to repo ──────────────
 permissions:
   contents: write
 
 jobs:
   generate-recap:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180     # panels take longer — give plenty of room
 
     steps:
 
-      - name: 📥 Checkout
+      - name: 📥 Checkout (with panels)
         uses: actions/checkout@v4
+        with:
+          lfs: true          # in case you store panels via Git LFS
 
       - name: 🐍 Python 3.11
         uses: actions/setup-python@v5
@@ -43,7 +52,7 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: 🔧 Install FFmpeg + espeak-ng + fonts
+      - name: 🔧 Install system deps
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
@@ -53,87 +62,100 @@ jobs:
             --no-install-recommends
 
       - name: 📦 Install Python packages
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: 📋 Resolve config
         id: cfg
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             CHAPTERS="${{ github.event.inputs.chapters }}"
-            SCENES="${{ github.event.inputs.scenes }}"
             FORMAT="${{ github.event.inputs.format }}"
-          elif [ -f chapters.txt ]; then
-            CHAPTERS=$(grep -v '^#' chapters.txt | grep -v '^$' | sed -n '1p' | tr -d ' ')
-            SCENES=$(grep -v '^#' chapters.txt | grep -v '^$' | sed -n '2p' | tr -d ' ')
-            FORMAT=$(grep -v '^#' chapters.txt | grep -v '^$' | sed -n '3p' | tr -d ' ')
-            SCENES=${SCENES:-10}
+            VOICE="${{ github.event.inputs.voice }}"
+          elif [ -f config.txt ]; then
+            CHAPTERS=$(grep -v '^#' config.txt | grep -v '^$' | sed -n '1p' | tr -d ' ')
+            FORMAT=$(grep -v '^#'  config.txt | grep -v '^$' | sed -n '2p' | tr -d ' ')
+            VOICE=$(grep -v '^#'   config.txt | grep -v '^$' | sed -n '3p' | tr -d ' ')
+            CHAPTERS=${CHAPTERS:-1-5}
             FORMAT=${FORMAT:-reels}
+            VOICE=${VOICE:-am_adam}
           else
-            CHAPTERS="1-10"; SCENES="10"; FORMAT="reels"
+            CHAPTERS="1-5"; FORMAT="reels"; VOICE="am_adam"
           fi
           echo "chapters=$CHAPTERS" >> $GITHUB_OUTPUT
-          echo "scenes=$SCENES"     >> $GITHUB_OUTPUT
           echo "format=$FORMAT"     >> $GITHUB_OUTPUT
-          echo "▶  Chapters=$CHAPTERS | Scenes=$SCENES | Format=$FORMAT"
+          echo "voice=$VOICE"       >> $GITHUB_OUTPUT
+          echo "▶  Chapters=$CHAPTERS | Format=$FORMAT | Voice=$VOICE"
 
-      - name: 🎬 Run pipeline
-        env:
-          KEY1:         ${{ secrets.KEY1 }}
-          KEY2:         ${{ secrets.KEY2 }}
-          GEMINI_API_KEY: ${{ secrets.KEY1 }}
-          GROQ_API_KEY: ${{ secrets.GROQ_KEY }}
-          TG_TOKEN:     ${{ secrets.TG_TOKEN }}
-          USER_ID:      ${{ secrets.USER_ID }}
+      - name: 📊 Count panels
         run: |
-          python recap_pipeline.py \
-            --chapters "${{ steps.cfg.outputs.chapters }}" \
-            --scenes   "${{ steps.cfg.outputs.scenes }}"   \
-            --format   "${{ steps.cfg.outputs.format }}"
+          echo "=== Panel files found ==="
+          find panels/ -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" \) \
+            | sort | head -20
+          echo "Total: $(find panels/ -type f \( -name "*.jpg" -o -name "*.jpeg" -o -name "*.png" \) | wc -l) panels"
 
-      - name: 📄 Show generated script
+      - name: 🎬 Generate recap
+        env:
+          KEY1:           ${{ secrets.KEY1 }}
+          KEY2:           ${{ secrets.KEY2 }}
+          GEMINI_API_KEY: ${{ secrets.KEY1 }}
+          GROQ_API_KEY:   ${{ secrets.GROQ_KEY }}
+          TG_TOKEN:       ${{ secrets.TG_TOKEN }}
+          USER_ID:        ${{ secrets.USER_ID }}
+        run: |
+          python panel_pipeline.py \
+            --panels-dir panels \
+            --chapters   "${{ steps.cfg.outputs.chapters }}" \
+            --format     "${{ steps.cfg.outputs.format }}"   \
+            --voice      "${{ steps.cfg.outputs.voice }}"
+
+      - name: 📄 Show narration log
         if: always()
-        run: cat workspace/generated_script.json 2>/dev/null || echo "No script generated"
+        run: |
+          if [ -f workspace/narration_log.json ]; then
+            echo "=== NARRATION LOG (first 5 panels) ==="
+            python3 -c "
+          import json
+          data = json.load(open('workspace/narration_log.json'))
+          for p in data[:5]:
+              print(f\"Panel {p['panel']} Ch.{p['chapter']} ({p['file']}):')
+              print(f\"  {p['narration'][:100]}...\")
+              print()
+          "
+          fi
 
-      - name: 📤 Upload artifact
+      - name: 📤 Upload video artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: recap-ch${{ steps.cfg.outputs.chapters }}-${{ steps.cfg.outputs.format }}-run${{ github.run_number }}
+          name: panel-recap-ch${{ steps.cfg.outputs.chapters }}-${{ steps.cfg.outputs.format }}-run${{ github.run_number }}
           path: output/*.mp4
-          retention-days: 14
+          retention-days: 30
 
       - name: 💾 Commit output
         if: success()
+        continue-on-error: true
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add output/*.mp4 workspace/generated_script.json 2>/dev/null || true
+          git add output/*.mp4 workspace/narration_log.json 2>/dev/null || true
           git diff --cached --quiet || \
-            git commit -m "🎬 Solo Leveling Ch.${{ steps.cfg.outputs.chapters }} [${{ steps.cfg.outputs.format }}] [run #${{ github.run_number }}]"
-          git push
+            git commit -m "🎬 Panel recap Ch.${{ steps.cfg.outputs.chapters }} [${{ steps.cfg.outputs.format }}] [run #${{ github.run_number }}]"
+          git push || true
 
-      - name: 📱 Telegram — success
-        if: success()
+      - name: 📱 Telegram — done
+        if: always()
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           USER_ID:  ${{ secrets.USER_ID }}
         run: |
+          STATUS="${{ job.status }}"
           URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ "$STATUS" = "success" ]; then
+            MSG="✅ <b>Panel Recap Ch.${{ steps.cfg.outputs.chapters }}</b> done!%0A📐 ${{ steps.cfg.outputs.format }}%0A🎬 Download: ${URL}"
+          else
+            MSG="❌ <b>Failed</b> Ch.${{ steps.cfg.outputs.chapters }}%0ALogs: ${URL}"
+          fi
           curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
             -d chat_id="${USER_ID}" \
             -d parse_mode="HTML" \
-            -d text="✅ <b>Solo Leveling Ch.${{ steps.cfg.outputs.chapters }}</b> done!%0A📐 Format: ${{ steps.cfg.outputs.format }}%0A🎬 Download: ${URL}" || true
-
-      - name: 📱 Telegram — failure
-        if: failure()
-        env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN }}
-          USER_ID:  ${{ secrets.USER_ID }}
-        run: |
-          URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -s -X POST "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" \
-            -d chat_id="${USER_ID}" \
-            -d parse_mode="HTML" \
-            -d text="❌ <b>Failed</b> Ch.${{ steps.cfg.outputs.chapters }}%0ALogs: ${URL}" || true
+            -d text="$MSG" || true
