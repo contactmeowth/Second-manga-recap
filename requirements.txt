@@ -1,4 +1,0 @@
-requests>=2.31.0
-edge-tts>=6.1.9
-kokoro>=0.9.4
-soundfile>=0.12.1
