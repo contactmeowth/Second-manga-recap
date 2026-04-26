@@ -1,0 +1,7 @@
+# Panel Recap Config
+# Line 1: chapter range
+# Line 2: format (reels or youtube)
+# Line 3: voice
+1-5
+reels
+am_adam
