@@ -1,7 +1,0 @@
-# Solo Leveling — Config
-# Line 1: chapter range
-# Line 2: number of scenes
-# Line 3: format (reels = 1080x1920 for Instagram/FB | youtube = 1280x720)
-1-10
-10
-reels
